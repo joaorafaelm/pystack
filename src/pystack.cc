@@ -18,7 +18,10 @@
 #include <chrono>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <utility>
 
 #include "./config.h"
 #include "./exc.h"
@@ -28,7 +31,7 @@
 using namespace pystack;
 
 namespace {
-const char usage_str[] = "Usage: pystack [-h|--help] [-j|--json] PID\n";
+const char usage_str[] = "Usage: pystack [-h|--help] PID\n";
 
 void RunOnce(pid_t pid, unsigned long addr) {
   std::vector<Frame> stack = GetStack(pid, addr);
@@ -37,6 +40,19 @@ void RunOnce(pid_t pid, unsigned long addr) {
   }
   std::cout << std::flush;
 }
+
+typedef std::vector<Frame> frames_t;
+
+struct FrameHash {
+  size_t operator()(const frames_t &frames) const {
+    size_t hash = 0;
+    for (size_t i = 0; i < frames.size(); i++) {
+      hash ^= std::hash<size_t>()(i);
+      hash ^= std::hash<std::string>()(frames[i].file());
+    }
+    return hash;
+  }
+};
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -95,18 +111,25 @@ int main(int argc, char **argv) {
   try {
     PtraceAttach(pid);
     const unsigned long addr = ThreadStateAddr(pid);
-    const std::chrono::microseconds interval{
-        static_cast<long>(sample_rate * 1000000)};
     if (seconds) {
+      const std::chrono::microseconds interval{
+          static_cast<long>(sample_rate * 1000000)};
+      std::unordered_map<frames_t, size_t, FrameHash> buckets;
+      size_t empty = 0;
       auto end =
           std::chrono::system_clock::now() +
           std::chrono::microseconds(static_cast<long>(seconds * 1000000));
       for (;;) {
         try {
-          RunOnce(pid, addr);
+          frames_t frames = GetStack(pid, addr);
+          auto it = buckets.find(frames);
+          if (it == buckets.end()) {
+            buckets.insert(it, {frames, 1});
+          } else {
+            it->second++;
+          }
         } catch (const NonFatalException &exc) {
-          // continue if we get a non-fatal exception
-          std::cerr << exc.what() << std::endl;
+          empty++;
         }
         auto now = std::chrono::system_clock::now();
         if (now + interval >= end) {
@@ -114,8 +137,23 @@ int main(int argc, char **argv) {
         }
         PtraceDetach(pid);
         std::this_thread::sleep_for(interval);
-        std::cout << "\n";
         PtraceAttach(pid);
+      }
+      if (empty) {
+        std::cout << "(null) " << empty << "\n";
+      }
+      // process the frames
+      for (const auto &kv : buckets) {
+        if (kv.first.empty()) {
+          std::cerr << "uh oh\n";
+          return 1;
+        }
+        auto last = kv.first.rend();
+        last--;
+        for (auto it = kv.first.rbegin(); it != last; ++it) {
+          std::cout << *it << ";";
+        }
+        std::cout << *last << " " << kv.second << "\n";
       }
     } else {
       RunOnce(pid, addr);

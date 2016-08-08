@@ -31,6 +31,9 @@ class Frame {
 
   inline const std::string &file() const { return file_; }
   inline size_t line() const { return line_; }
+  inline bool operator==(const Frame &other) const {
+    return file_ == other.file_ && line_ == other.line_;
+  }
 
  private:
   std::string file_;
